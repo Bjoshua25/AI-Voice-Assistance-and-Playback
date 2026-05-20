@@ -5,7 +5,7 @@
 #include <ArduinoJson.h>
 
 // --- Configuration ---
-const char* ssid = "GodWin";
+const char* ssid = "Godwin";
 const char* password = "iiiiiiii";
 const char* wit_token = "5UMB2NTKO7IAFFESKLO5FHFSWOIKA5HL";
 
@@ -31,18 +31,22 @@ void setupI2S() {
     const i2s_config_t i2s_config = {
         .mode = (i2s_mode_t)(I2S_MODE_MASTER | I2S_MODE_RX),
         .sample_rate = SAMPLE_RATE,
-        .bits_per_sample = I2S_BITS_PER_SAMPLE_16BIT,
+        .bits_per_sample = I2S_BITS_PER_SAMPLE_16BIT, 
         .channel_format = I2S_CHANNEL_FMT_ONLY_LEFT,
-        .communication_format = I2S_COMM_FORMAT_STAND_I2S,
+        .communication_format = I2S_COMM_FORMAT_STAND_I2S, // Philips Standard for INMP441
         .intr_alloc_flags = ESP_INTR_FLAG_LEVEL1,
         .dma_buf_count = 8,
         .dma_buf_len = 64,
         .use_apll = false
     };
+
     const i2s_pin_config_t pin_config = {
-        .bck_io_num = I2S_SCK, .ws_io_num = I2S_WS,
-        .data_out_num = -1, .data_in_num = I2S_SD
+        .bck_io_num = I2S_SCK, 
+        .ws_io_num = I2S_WS,
+        .data_out_num = -1, 
+        .data_in_num = I2S_SD
     };
+
     i2s_driver_install(I2S_PORT, &i2s_config, 0, NULL);
     i2s_set_pin(I2S_PORT, &pin_config);
 }
@@ -66,35 +70,35 @@ IntentResponse performRecognition() {
     digitalWrite(RECORDING_LED, HIGH); 
     Serial.println(">>> LISTENING...");
 
+    // Send HTTP Headers
     client.println("POST /speech?v=20240304 HTTP/1.1");
     client.println("Host: api.wit.ai");
-    client.printf("Authorization: Bearer %s\n", wit_token);
+    client.printf("Authorization: Bearer %s\r\n", wit_token);
     client.println("Content-Type: audio/raw;encoding=signed-integer;bits=16;rate=16000;endian=little");
     client.println("Transfer-Encoding: chunked");
+    client.println("Connection: close");
     client.println();
 
     unsigned long start_time = millis();
     int16_t i2s_buffer[CHUNK_SIZE];
     size_t bytes_read;
 
+    // Stream audio for 4 seconds
     while (millis() - start_time < 4000) { 
         i2s_read(I2S_PORT, &i2s_buffer, sizeof(i2s_buffer), &bytes_read, portMAX_DELAY);
         if (bytes_read > 0) {
-            int samples_read = bytes_read / 2;
-            for (int i = 0; i < samples_read; i++) {
-                i2s_buffer[i] = i2s_buffer[i] << 4; // High gain for INMP441
-            }
             client.printf("%X\r\n", bytes_read);
             client.write((uint8_t*)i2s_buffer, bytes_read);
             client.print("\r\n");
         }
     }
 
+    // End Chunked Stream
     client.print("0\r\n\r\n"); 
     digitalWrite(RECORDING_LED, LOW); 
     Serial.println(">>> PROCESSING...");
 
-    // 1. Parse HTTP Headers
+    // 1. Skip HTTP Headers
     while (client.connected()) {
         String line = client.readStringUntil('\n');
         if (line.startsWith("HTTP/1.1")) {
@@ -103,34 +107,41 @@ IntentResponse performRecognition() {
         if (line == "\r") break; 
     }
 
-    // 2. Capture and Print RAW JSON Body
-    String rawResponse = "";
-    while (client.available()) {
-        char c = client.read();
-        rawResponse += c;
-    }
-    
-    Serial.println("--- RAW SERVER RESPONSE ---");
-    Serial.println(rawResponse);
-    Serial.println("---------------------------");
+    // 2. Parse the multi-object JSON stream
+    // Wit.ai sends several JSON objects; we want the one marked 'FINAL_UNDERSTANDING'
+    while (client.available() || client.connected()) {
+        String line = client.readStringUntil('\n');
+        line.trim();
 
-    // 3. Parse JSON from the captured string
-    if (result.httpStatus == 200 && rawResponse.length() > 0) {
-        StaticJsonDocument<2048> doc;
-        DeserializationError error = deserializeJson(doc, rawResponse);
-        
-        if (!error) {
-            result.text = doc["text"].as<String>();
-            if (doc["intents"].size() > 0) {
-                result.intent = doc["intents"][0]["name"].as<String>();
-                result.confidence = doc["intents"][0]["confidence"].as<float>();
-            }
-            JsonObject entities = doc["entities"].as<JsonObject>();
-            for (JsonPair p : entities) {
-                result.entity_value = p.value()[0]["value"].as<String>();
-                break; 
+        // Basic check: is this a JSON line?
+        if (line.startsWith("{")) {
+            DynamicJsonDocument doc(4096);
+            DeserializationError error = deserializeJson(doc, line);
+
+            if (!error) {
+                // Update text continuously as it comes in
+                if (doc.containsKey("text")) {
+                    result.text = doc["text"].as<String>();
+                }
+
+                // If this is the Final Intelligence payload, extract intents/entities
+                if (doc["type"] == "FINAL_UNDERSTANDING") {
+                    if (doc["intents"].size() > 0) {
+                        result.intent = doc["intents"][0]["name"].as<String>();
+                        result.confidence = doc["intents"][0]["confidence"].as<float>();
+                    }
+
+                    JsonObject entities = doc["entities"].as<JsonObject>();
+                    for (JsonPair p : entities) {
+                        // Takes the first entity found
+                        result.entity_value = p.value()[0]["value"].as<String>();
+                        break; 
+                    }
+                    break; // We have the final data, we can stop reading
+                }
             }
         }
+        if (line == "0") break; // Chunked end marker
     }
 
     client.stop();
@@ -147,9 +158,15 @@ void setup() {
 
 void loop() {
     if (Serial.available() > 0) {
-        if (Serial.read() == 'r') {
+        char c = Serial.read();
+        if (c == 'r') {
             IntentResponse resp = performRecognition();
-            Serial.printf("Final Intent: %s\n", resp.intent.c_str());
+            Serial.println("---------------------------");
+            Serial.printf("Status: %d\n", resp.httpStatus);
+            Serial.printf("Text: %s\n", resp.text.c_str());
+            Serial.printf("Intent: %s (%.2f)\n", resp.intent.c_str(), resp.confidence);
+            Serial.printf("Entity Value: %s\n", resp.entity_value.c_str());
+            Serial.println("---------------------------");
         }
     }
 }
