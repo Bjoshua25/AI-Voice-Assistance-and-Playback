@@ -124,4 +124,18 @@ To configure or make any adjustments on the Xiaozhi codebase, I strongly recomme
 
 
 
+## RECOMMENDATION AND FUTURE CONSIDERATIONS
+- Look for a better ESP 32 Module that has a PSRAM and better Compute Power. 
+    - Example: `ESP32 S3 series`
+    - This will prevent using two different modules
+- Implement Wakeword model provided by Xiaozhi or Train a custom TinyML wakeword model.
+- Find a way to indicate with LED when the system is Listening, in Idle mode or when in Sleep Mode.
+
+
+For more info, contact me on:
+bolajijoshua35@gmail.com 
+
+
+
+
 
